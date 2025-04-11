@@ -1,0 +1,11 @@
+﻿  MimiHollowed.c
+C:\Users\hacker\Desktop\Arsenal\Loders\PELoader\MimiHollowed\MimiHollowed.c(30,23): warning C4018: '<': no coinciden signed/unsigned
+C:\Users\hacker\Desktop\Arsenal\Loders\PELoader\MimiHollowed\MimiHollowed.c(94,42): warning C4047: 'función': 'DWORD' es distinto en los niveles de direccionamiento indirecto de 'void *'
+C:\Users\hacker\Desktop\Arsenal\Loders\PELoader\MimiHollowed\MimiHollowed.c(94,42): warning C4024: 'PeekNamedPipe': tipos distintos para el parámetro formal y el parámetro real 3
+C:\Users\hacker\Desktop\Arsenal\Loders\PELoader\MimiHollowed\MimiHollowed.c(150,60): warning C4133: 'función': tipos incompatibles, de 'STARTUPINFO *' a 'LPSTARTUPINFOA'
+C:\Users\hacker\Desktop\Arsenal\Loders\PELoader\MimiHollowed\MimiHollowed.c(267,27): warning C4244: 'inicializando': conversión de 'DWORD64' a 'DWORD'; posible pérdida de datos
+  Generando código
+  Previous IPDB not found, fall back to full compilation.
+  All 16 functions were compiled because no usable IPDB/IOBJ from previous compilation was found.
+  Generación de código finalizada
+  MimiHollowed.vcxproj -> C:\Users\hacker\Desktop\Arsenal\Loders\PELoader\MimiHollowed\x64\Release\MimiHollowed.exe
