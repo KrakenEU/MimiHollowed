@@ -341,5 +341,11 @@ int main(int argc, char* argv[]) {
         pPeArgs = "coffee exit";
     }
     
-    return DeployPayload(pPayloadData, TARGET_APP_PATH, pPeArgs) ? EXIT_SUCCESS : EXIT_FAILURE;
+    DeployPayload(pPayloadData, TARGET_APP_PATH, pPeArgs);
+    
+    if (pPayloadData)
+        VirtualFree(pPayloadData, 0, MEM_RELEASE);
+    if (pPeArgs)
+        VirtualFree(pPeArgs, 0, MEM_RELEASE);
+    
 }
